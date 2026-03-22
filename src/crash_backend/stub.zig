@@ -1,6 +1,7 @@
 const std = @import("std");
 const crash_backend = @import("../crash_backend.zig");
 const crash_report = @import("../crash_report.zig");
+const symbolize = @import("../symbolize.zig");
 
 pub fn collect(allocator: std.mem.Allocator, options: crash_backend.Options) !crash_report.CrashReport {
     _ = options.max_output_bytes;
@@ -8,10 +9,29 @@ pub fn collect(allocator: std.mem.Allocator, options: crash_backend.Options) !cr
     const summary = try std.fmt.allocPrint(allocator, "{s} terminated with a synthetic SIGSEGV report.", .{basename});
     const probable_cause = "likely null optional dereference or invalid pointer use near a Zig call boundary";
 
-    const stack = try allocator.alloc(crash_report.StackFrame, 3);
-    stack[0] = .{ .file = "src/client.zig", .line = 92, .symbol = "RedisClient.send" };
-    stack[1] = .{ .file = "src/client.zig", .line = 57, .symbol = "RedisClient.command" };
-    stack[2] = .{ .file = "src/main.zig", .line = 78, .symbol = "py_command" };
+    const stack = try symbolize.symbolizeFrames(allocator, .passthrough, &.{
+        .{
+            .module = options.binary,
+            .address = 0x1010,
+            .symbol = "RedisClient.send",
+            .file = "src/client.zig",
+            .line = 92,
+        },
+        .{
+            .module = options.binary,
+            .address = 0x1020,
+            .symbol = "RedisClient.command",
+            .file = "src/client.zig",
+            .line = 57,
+        },
+        .{
+            .module = options.binary,
+            .address = 0x1030,
+            .symbol = "py_command",
+            .file = "src/main.zig",
+            .line = 78,
+        },
+    });
 
     const registers = try allocator.alloc(crash_report.RegisterValue, 2);
     registers[0] = .{ .name = "x0", .value = "0x0000000000000000", .meaning = "possible null receiver pointer" };
