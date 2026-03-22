@@ -22,7 +22,7 @@ fn parseOptions(args: []const []const u8) !Options {
     if (args.len == 0) return error.MissingTarget;
 
     var duration_ms: u32 = 2000;
-    var backend: collector.Backend = .stub;
+    var backend: collector.Backend = collector.defaultBackend();
     var target: ?[]const u8 = null;
     var target_args: []const []const u8 = &.{};
 
@@ -65,6 +65,7 @@ fn parseOptions(args: []const []const u8) !Options {
 
 fn parseBackend(raw: []const u8) ?collector.Backend {
     if (std.mem.eql(u8, raw, "stub")) return .stub;
+    if (std.mem.eql(u8, raw, "macos-sample")) return .macos_sample;
     return null;
 }
 
