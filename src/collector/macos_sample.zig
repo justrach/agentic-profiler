@@ -3,6 +3,14 @@ const collector = @import("../collector.zig");
 const profile = @import("../profile.zig");
 
 pub fn collect(allocator: std.mem.Allocator, options: collector.Options) !profile.CpuProfile {
+    if (options.pid) |pid| {
+        return collectAttached(allocator, options, pid);
+    }
+
+    return collectSpawned(allocator, options);
+}
+
+fn collectSpawned(allocator: std.mem.Allocator, options: collector.Options) !profile.CpuProfile {
     const argv = try buildTargetArgv(allocator, options);
 
     var target = std.process.Child.init(argv, allocator);
@@ -10,41 +18,46 @@ pub fn collect(allocator: std.mem.Allocator, options: collector.Options) !profil
     target.stdout_behavior = .Ignore;
     target.stderr_behavior = .Ignore;
     try target.spawn();
-    const pid = target.id;
-
-    const sample_path = try makeSamplePath(allocator);
-    defer std.fs.cwd().deleteFile(sample_path) catch {};
-
-    const sample_seconds = durationSeconds(options.duration_ms);
-    const sample_result = try std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{
-            "/usr/bin/sample",
-            try std.fmt.allocPrint(allocator, "{d}", .{pid}),
-            try std.fmt.allocPrint(allocator, "{d}", .{sample_seconds}),
-            "1",
-            "-mayDie",
-            "-fullPaths",
-            "-file",
-            sample_path,
-        },
-        .max_output_bytes = 256 * 1024,
-    });
-
-    const term = try target.wait();
-    const sample_text = std.fs.cwd().readFileAlloc(allocator, sample_path, 4 * 1024 * 1024) catch |err| switch (err) {
-        error.FileNotFound => "",
+    const sample_capture = try runSample(allocator, target.id, options.duration_ms);
+    const term = target.kill() catch |err| switch (err) {
+        error.AlreadyTerminated => try target.wait(),
         else => return err,
     };
-    const parsed = try parseSampleOutput(allocator, options.binary, sample_text);
+    const target_status = try describeTerminatedTarget(allocator, term);
 
+    return buildProfileFromCapture(allocator, options, sample_capture, target_status);
+}
+
+fn collectAttached(
+    allocator: std.mem.Allocator,
+    options: collector.Options,
+    pid: std.posix.pid_t,
+) !profile.CpuProfile {
+    const sample_capture = try runSample(allocator, pid, options.duration_ms);
+    const target_status = try std.fmt.allocPrint(allocator, "attached to pid {d}; process left running after sampling", .{pid});
+
+    return buildProfileFromCapture(allocator, options, sample_capture, target_status);
+}
+
+const SampleCapture = struct {
+    stderr: []const u8,
+    text: []const u8,
+};
+
+fn buildProfileFromCapture(
+    allocator: std.mem.Allocator,
+    options: collector.Options,
+    sample_capture: SampleCapture,
+    target_status: []const u8,
+) !profile.CpuProfile {
+    const parsed = try parseSampleOutput(allocator, options.binary, sample_capture.text);
     const notes = try buildNotes(
         allocator,
-        term,
-        sample_result.stderr,
+        target_status,
+        sample_capture.stderr,
         parsed.total_samples,
         parsed.parsed_functions,
-        sample_text.len == 0,
+        sample_capture.text.len == 0,
     );
 
     return .{
@@ -73,6 +86,46 @@ fn makeSamplePath(allocator: std.mem.Allocator) ![]const u8 {
 
 fn durationSeconds(duration_ms: u32) u32 {
     return @max(1, (duration_ms + 999) / 1000);
+}
+
+fn runSample(allocator: std.mem.Allocator, pid: std.posix.pid_t, duration_ms: u32) !SampleCapture {
+    const sample_path = try makeSamplePath(allocator);
+    defer std.fs.cwd().deleteFile(sample_path) catch {};
+
+    const sample_seconds = durationSeconds(duration_ms);
+    const sample_result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{
+            "/usr/bin/sample",
+            try std.fmt.allocPrint(allocator, "{d}", .{pid}),
+            try std.fmt.allocPrint(allocator, "{d}", .{sample_seconds}),
+            "1",
+            "-mayDie",
+            "-fullPaths",
+            "-file",
+            sample_path,
+        },
+        .max_output_bytes = 256 * 1024,
+    });
+
+    const sample_text = std.fs.cwd().readFileAlloc(allocator, sample_path, 4 * 1024 * 1024) catch |err| switch (err) {
+        error.FileNotFound => "",
+        else => return err,
+    };
+
+    return .{
+        .stderr = sample_result.stderr,
+        .text = sample_text,
+    };
+}
+
+fn describeTerminatedTarget(allocator: std.mem.Allocator, term: std.process.Child.Term) ![]const u8 {
+    return switch (term) {
+        .Exited => |code| try std.fmt.allocPrint(allocator, "target exited with code {d}", .{code}),
+        .Signal => |signal| try std.fmt.allocPrint(allocator, "target terminated with signal {d}", .{signal}),
+        .Stopped => |signal| try std.fmt.allocPrint(allocator, "target stopped with signal {d}", .{signal}),
+        .Unknown => |value| try std.fmt.allocPrint(allocator, "target terminated in unknown state {d}", .{value}),
+    };
 }
 
 const ParsedSample = struct {
@@ -210,19 +263,12 @@ fn parseCallGraph(
 
 fn buildNotes(
     allocator: std.mem.Allocator,
-    term: std.process.Child.Term,
+    target_status: []const u8,
     sample_stderr: []const u8,
     total_samples: u32,
     parsed_functions: usize,
     sample_report_missing: bool,
 ) ![]const u8 {
-    const term_text = switch (term) {
-        .Exited => |code| try std.fmt.allocPrint(allocator, "target exited with code {d}", .{code}),
-        .Signal => |signal| try std.fmt.allocPrint(allocator, "target terminated with signal {d}", .{signal}),
-        .Stopped => |signal| try std.fmt.allocPrint(allocator, "target stopped with signal {d}", .{signal}),
-        .Unknown => |value| try std.fmt.allocPrint(allocator, "target terminated in unknown state {d}", .{value}),
-    };
-
     if (parsed_functions == 0) {
         const sample_text = if (sample_report_missing)
             "macOS sample did not produce a report file before the target exited"
@@ -236,13 +282,13 @@ fn buildNotes(
             return try std.fmt.allocPrint(
                 allocator,
                 "Collected a macOS sample profile, but extracted no parseable functions; {s}; {s}. sample stderr: {s}",
-                .{ sample_text, term_text, trimmed_stderr },
+                .{ sample_text, target_status, trimmed_stderr },
             );
         }
         return try std.fmt.allocPrint(
             allocator,
             "Collected a macOS sample profile, but extracted no parseable functions; {s}; {s}.",
-            .{ sample_text, term_text },
+            .{ sample_text, target_status },
         );
     }
 
@@ -251,14 +297,14 @@ fn buildNotes(
         return try std.fmt.allocPrint(
             allocator,
             "Collected a macOS sample profile; parsed {d} top-of-stack functions; {s}. sample stderr: {s}",
-            .{ parsed_functions, term_text, trimmed_stderr },
+            .{ parsed_functions, target_status, trimmed_stderr },
         );
     }
 
     return try std.fmt.allocPrint(
         allocator,
         "Collected a macOS sample profile; parsed {d} top-of-stack functions; {s}. File/line symbolization is not implemented yet for sample output.",
-        .{ parsed_functions, term_text },
+        .{ parsed_functions, target_status },
     );
 }
 

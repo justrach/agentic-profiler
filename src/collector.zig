@@ -6,6 +6,7 @@ pub const Options = struct {
     binary: []const u8,
     args: []const []const u8,
     duration_ms: u32,
+    pid: ?std.posix.pid_t = null,
 };
 
 pub const Backend = enum {
