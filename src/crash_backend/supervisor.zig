@@ -1,6 +1,7 @@
 const std = @import("std");
 const crash_backend = @import("../crash_backend.zig");
 const crash_report = @import("../crash_report.zig");
+const symbolize = @import("../symbolize.zig");
 
 pub fn collect(allocator: std.mem.Allocator, options: crash_backend.Options) !crash_report.CrashReport {
     const argv = try buildArgv(allocator, options);
@@ -11,6 +12,7 @@ pub fn collect(allocator: std.mem.Allocator, options: crash_backend.Options) !cr
     }) catch |err| return buildExecutionFailureReport(allocator, options, err);
 
     const classification = classifyTermination(result.term);
+    const stack = try symbolizeStderr(allocator, options.binary, result.stderr);
 
     return .{
         .binary = options.binary,
@@ -26,7 +28,7 @@ pub fn collect(allocator: std.mem.Allocator, options: crash_backend.Options) !cr
         .notes = "Supervisor backend captured child termination and stdio. Stack symbolization, core dump ingestion, and register extraction are the next layer.",
         .stdout = result.stdout,
         .stderr = result.stderr,
-        .stack = try allocator.alloc(crash_report.StackFrame, 0),
+        .stack = stack,
         .registers = try allocator.alloc(crash_report.RegisterValue, 0),
     };
 }
@@ -139,6 +141,14 @@ fn buildExecutionFailureReport(
     };
 }
 
+fn symbolizeStderr(allocator: std.mem.Allocator, module: []const u8, stderr: []const u8) ![]crash_report.StackFrame {
+    const raw_frames = try symbolize.parseZigStackTrace(allocator, module, stderr);
+    if (raw_frames.len == 0) {
+        return try allocator.alloc(crash_report.StackFrame, 0);
+    }
+    return try symbolize.symbolizeFrames(allocator, .passthrough, raw_frames);
+}
+
 fn signalName(signal: u32) []const u8 {
     return switch (signal) {
         4 => "SIGILL",
@@ -186,4 +196,22 @@ test "classifyTermination handles signal" {
     try std.testing.expectEqual(@as(?u32, null), classification.exit_code);
     try std.testing.expectEqual(@as(?u32, 11), classification.signal_number);
     try std.testing.expectEqualStrings("SIGSEGV", classification.signal_name);
+}
+
+test "symbolizeStderr extracts zig-style frames" {
+    const stderr =
+        \\/tmp/demo.zig:12:9: 0x1111 in main (demo)
+        \\    unreachable;
+        \\/tmp/lib.zig:44:3: 0x2222 in helper (demo)
+        \\    return;
+        \\
+    ;
+
+    const frames = try symbolizeStderr(std.testing.allocator, "demo", stderr);
+    defer std.testing.allocator.free(frames);
+
+    try std.testing.expectEqual(@as(usize, 2), frames.len);
+    try std.testing.expectEqualStrings("/tmp/demo.zig", frames[0].file);
+    try std.testing.expectEqualStrings("main", frames[0].symbol);
+    try std.testing.expectEqual(@as(?u64, 0x1111), frames[0].address);
 }
