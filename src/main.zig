@@ -30,6 +30,9 @@ const usage_text =
     \\  backends: stub, supervisor
     \\  supervisor currently captures termination and stdio only
     \\
+    \\Bench options:
+    \\  zigprofiler bench [--json] [--iterations <n>] [--output <path>] <binary> [-- <target args...>]
+    \\
     \\Diff options:
     \\  zigprofiler diff [--json] <before artifact> <after artifact>
     \\
@@ -69,7 +72,13 @@ pub fn main() !void {
             try result.persist();
             try result.render(stdout, parsed.format);
         },
-        .bench => try bench_cmd.execute().render(stdout, parsed.format),
+        .bench => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const result = try bench_cmd.execute(arena.allocator(), parsed.command_args);
+            try result.persist();
+            try result.render(stdout, parsed.format);
+        },
         .diff => {
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();

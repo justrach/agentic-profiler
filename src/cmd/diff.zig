@@ -1,5 +1,6 @@
 const std = @import("std");
 const artifact_io = @import("../artifact_io.zig");
+const benchmark = @import("../benchmark.zig");
 const crash_report = @import("../crash_report.zig");
 const output = @import("../output.zig");
 const profile = @import("../profile.zig");
@@ -10,14 +11,64 @@ pub const Options = struct {
 };
 
 pub const Result = union(enum) {
+    bench: BenchmarkRunDiff,
     cpu: CpuProfileDiff,
     crash: CrashReportDiff,
 
     pub fn render(self: Result, writer: anytype, format: output.Format) !void {
         switch (self) {
+            .bench => |value| try value.render(writer, format),
             .cpu => |value| try value.render(writer, format),
             .crash => |value| try value.render(writer, format),
         }
+    }
+};
+
+const BenchmarkRunDiff = struct {
+    before_path: []const u8,
+    after_path: []const u8,
+    before_iterations: u32,
+    after_iterations: u32,
+    wall_time_mean_delta_ms: f64,
+    cpu_pct_mean_delta: f64,
+    user_time_mean_delta_ms: f64,
+    system_time_mean_delta_ms: f64,
+    max_rss_mean_delta_bytes: i64,
+
+    fn render(self: BenchmarkRunDiff, writer: anytype, format: output.Format) !void {
+        switch (format) {
+            .text => try self.renderText(writer),
+            .json => try self.renderJson(writer),
+        }
+    }
+
+    fn renderText(self: BenchmarkRunDiff, writer: anytype) !void {
+        try writer.print("Benchmark diff\n", .{});
+        try writer.print("before: {s}\n", .{self.before_path});
+        try writer.print("after: {s}\n", .{self.after_path});
+        try writer.print("iterations: {d} -> {d}\n", .{ self.before_iterations, self.after_iterations });
+        try writer.print("wall mean delta: {d:.3} ms\n", .{self.wall_time_mean_delta_ms});
+        try writer.print("cpu mean delta: {d:.3}%\n", .{self.cpu_pct_mean_delta});
+        try writer.print("user mean delta: {d:.3} ms\n", .{self.user_time_mean_delta_ms});
+        try writer.print("sys mean delta: {d:.3} ms\n", .{self.system_time_mean_delta_ms});
+        try writer.print("max rss mean delta: {d} bytes\n", .{self.max_rss_mean_delta_bytes});
+    }
+
+    fn renderJson(self: BenchmarkRunDiff, writer: anytype) !void {
+        try writer.writeAll("{\n");
+        try writer.writeAll("  \"kind\": \"benchmark_run_diff\",\n");
+        try writer.writeAll("  \"before_path\": ");
+        try output.writeJsonString(writer, self.before_path);
+        try writer.writeAll(",\n  \"after_path\": ");
+        try output.writeJsonString(writer, self.after_path);
+        try writer.print(",\n  \"before_iterations\": {d},\n", .{self.before_iterations});
+        try writer.print("  \"after_iterations\": {d},\n", .{self.after_iterations});
+        try writer.print("  \"wall_time_mean_delta_ms\": {d:.3},\n", .{self.wall_time_mean_delta_ms});
+        try writer.print("  \"cpu_pct_mean_delta\": {d:.3},\n", .{self.cpu_pct_mean_delta});
+        try writer.print("  \"user_time_mean_delta_ms\": {d:.3},\n", .{self.user_time_mean_delta_ms});
+        try writer.print("  \"system_time_mean_delta_ms\": {d:.3},\n", .{self.system_time_mean_delta_ms});
+        try writer.print("  \"max_rss_mean_delta_bytes\": {d}\n", .{self.max_rss_mean_delta_bytes});
+        try writer.writeAll("}\n");
     }
 };
 
@@ -155,14 +206,10 @@ const CrashReportDiff = struct {
     }
 };
 
-const ArtifactKindEnvelope = struct {
-    kind: []const u8,
-};
-
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !Result {
     const options = try parseOptions(args);
-    const before_kind = try loadArtifactKind(allocator, options.before_path);
-    const after_kind = try loadArtifactKind(allocator, options.after_path);
+    const before_kind = try artifact_io.loadArtifactKind(allocator, options.before_path);
+    const after_kind = try artifact_io.loadArtifactKind(allocator, options.after_path);
 
     if (!std.mem.eql(u8, before_kind, after_kind)) return error.MismatchedArtifactKinds;
 
@@ -170,6 +217,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !Result {
         const before = try artifact_io.loadCpuProfile(allocator, options.before_path);
         const after = try artifact_io.loadCpuProfile(allocator, options.after_path);
         return .{ .cpu = try diffCpuProfiles(allocator, options.before_path, before, options.after_path, after) };
+    }
+
+    if (std.mem.eql(u8, before_kind, "benchmark_run")) {
+        const before = try artifact_io.loadBenchmarkRun(allocator, options.before_path);
+        const after = try artifact_io.loadBenchmarkRun(allocator, options.after_path);
+        return .{ .bench = diffBenchmarkRuns(options.before_path, before, options.after_path, after) };
     }
 
     if (std.mem.eql(u8, before_kind, "crash_report")) {
@@ -181,30 +234,31 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !Result {
     return error.UnsupportedArtifactKind;
 }
 
+fn diffBenchmarkRuns(
+    before_path: []const u8,
+    before: benchmark.BenchmarkRun,
+    after_path: []const u8,
+    after: benchmark.BenchmarkRun,
+) BenchmarkRunDiff {
+    return .{
+        .before_path = before_path,
+        .after_path = after_path,
+        .before_iterations = before.iterations,
+        .after_iterations = after.iterations,
+        .wall_time_mean_delta_ms = after.wall_time_mean_ms - before.wall_time_mean_ms,
+        .cpu_pct_mean_delta = after.cpu_pct_mean - before.cpu_pct_mean,
+        .user_time_mean_delta_ms = after.user_time_mean_ms - before.user_time_mean_ms,
+        .system_time_mean_delta_ms = after.system_time_mean_ms - before.system_time_mean_ms,
+        .max_rss_mean_delta_bytes = @as(i64, @intCast(after.max_rss_mean_bytes)) - @as(i64, @intCast(before.max_rss_mean_bytes)),
+    };
+}
+
 fn parseOptions(args: []const []const u8) !Options {
     if (args.len != 2) return error.ExpectedBeforeAndAfterPaths;
     return .{
         .before_path = args[0],
         .after_path = args[1],
     };
-}
-
-fn loadArtifactKind(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-    const bytes = if (std.fs.path.isAbsolute(path))
-        blk: {
-            var file = try std.fs.openFileAbsolute(path, .{});
-            defer file.close();
-            break :blk try file.readToEndAlloc(allocator, 1024 * 1024);
-        }
-    else
-        try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
-    const parsed = try std.json.parseFromSlice(ArtifactKindEnvelope, allocator, bytes, .{
-        .allocate = .alloc_always,
-        .ignore_unknown_fields = true,
-    });
-    const kind = try allocator.dupe(u8, parsed.value.kind);
-    parsed.deinit();
-    return kind;
 }
 
 fn diffCpuProfiles(
@@ -335,4 +389,43 @@ test "diffCpuProfiles ranks changed functions" {
     const diff = try diffCpuProfiles(std.testing.allocator, "before.json", before, "after.json", after);
     try std.testing.expectEqual(@as(usize, 3), diff.function_deltas.len);
     try std.testing.expectEqualStrings("c", diff.function_deltas[0].name);
+}
+
+test "diffBenchmarkRuns compares summary stats" {
+    const before = benchmark.BenchmarkRun{
+        .binary = "a",
+        .args = &.{},
+        .iterations = 3,
+        .runner = "time-l",
+        .notes = "",
+        .wall_time_mean_ms = 10,
+        .wall_time_median_ms = 10,
+        .wall_time_min_ms = 9,
+        .wall_time_max_ms = 11,
+        .cpu_pct_mean = 80,
+        .user_time_mean_ms = 5,
+        .system_time_mean_ms = 1,
+        .max_rss_mean_bytes = 1000,
+        .measurements = &.{},
+    };
+    const after = benchmark.BenchmarkRun{
+        .binary = "b",
+        .args = &.{},
+        .iterations = 4,
+        .runner = "time-l",
+        .notes = "",
+        .wall_time_mean_ms = 14,
+        .wall_time_median_ms = 14,
+        .wall_time_min_ms = 13,
+        .wall_time_max_ms = 15,
+        .cpu_pct_mean = 70,
+        .user_time_mean_ms = 6,
+        .system_time_mean_ms = 2,
+        .max_rss_mean_bytes = 1500,
+        .measurements = &.{},
+    };
+
+    const diff = diffBenchmarkRuns("before", before, "after", after);
+    try std.testing.expectApproxEqAbs(@as(f64, 4), diff.wall_time_mean_delta_ms, 0.001);
+    try std.testing.expectEqual(@as(i64, 500), diff.max_rss_mean_delta_bytes);
 }
