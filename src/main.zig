@@ -22,11 +22,11 @@ const usage_text =
     \\  help    show this message
     \\
     \\Run options:
-    \\  zigprofiler run [--json] [--duration-ms <ms>] [--backend <name>] (--pid <pid> | <binary> [-- <target args...>])
+    \\  zigprofiler run [--json] [--duration-ms <ms>] [--backend <name>] [--output <path>] (--pid <pid> | <binary> [-- <target args...>])
     \\  backends: stub, macos-sample
     \\
     \\Crash options:
-    \\  zigprofiler crash [--json] [--backend <name>] [--max-output-bytes <n>] <binary> [-- <target args...>]
+    \\  zigprofiler crash [--json] [--backend <name>] [--max-output-bytes <n>] [--output <path>] <binary> [-- <target args...>]
     \\  backends: stub, supervisor
     \\  supervisor currently captures termination and stdio only
     \\
@@ -54,13 +54,17 @@ pub fn main() !void {
         .run => {
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
-            try (try run_cmd.execute(arena.allocator(), parsed.command_args)).render(stdout, parsed.format);
+            const result = try run_cmd.execute(arena.allocator(), parsed.command_args);
+            try result.persist();
+            try result.render(stdout, parsed.format);
         },
         .mem => try mem_cmd.execute().render(stdout, parsed.format),
         .crash => {
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
-            try (try crash_cmd.execute(arena.allocator(), parsed.command_args)).render(stdout, parsed.format);
+            const result = try crash_cmd.execute(arena.allocator(), parsed.command_args);
+            try result.persist();
+            try result.render(stdout, parsed.format);
         },
         .bench => try bench_cmd.execute().render(stdout, parsed.format),
         .diff => try diff_cmd.execute().render(stdout, parsed.format),
