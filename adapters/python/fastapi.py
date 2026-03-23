@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Query
@@ -13,6 +14,8 @@ def install_fastapi_profiler(
     profiler_bin: str = "agentic-profiler",
     route: str = "/__agentic/profile",
     token: str,
+    pid_provider: Callable[[], int] | None = None,
+    profiler_args: Sequence[str] = (),
 ) -> None:
     if not token:
         raise ValueError("token is required for the FastAPI profiler endpoint")
@@ -28,8 +31,9 @@ def install_fastapi_profiler(
         return await run_in_threadpool(
             _profile_pid,
             profiler_bin,
-            os.getpid(),
+            pid_provider() if pid_provider is not None else os.getpid(),
             duration_ms,
+            profiler_args,
         )
 
 
@@ -37,13 +41,15 @@ def _profile_pid(
     profiler_bin: str,
     pid: int,
     duration_ms: int,
+    profiler_args: Sequence[str],
 ) -> dict[str, Any]:
     command = [
         profiler_bin,
-        "run",
         "--json",
+        "run",
         "--duration-ms",
         str(duration_ms),
+        *profiler_args,
         "--pid",
         str(pid),
     ]
