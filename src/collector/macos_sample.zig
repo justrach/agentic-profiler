@@ -18,12 +18,18 @@ fn collectSpawned(allocator: std.mem.Allocator, options: collector.Options) !pro
     target.stdout_behavior = .Ignore;
     target.stderr_behavior = .Ignore;
     try target.spawn();
-    const sample_capture = try runSample(allocator, target.id, options.duration_ms);
+    const sample_plan = try selectSamplingTarget(allocator, target.id, options.duration_ms);
+    const sample_capture = try runSample(allocator, sample_plan.pid, options.duration_ms);
     const term = target.kill() catch |err| switch (err) {
         error.AlreadyTerminated => try target.wait(),
         else => return err,
     };
-    const target_status = try describeTerminatedTarget(allocator, term);
+    const termination = try describeTerminatedTarget(allocator, term);
+    const target_status = try std.fmt.allocPrint(
+        allocator,
+        "{s}; {s}",
+        .{ sample_plan.note, termination },
+    );
 
     return buildProfileFromCapture(allocator, options, sample_capture, target_status);
 }
@@ -34,7 +40,11 @@ fn collectAttached(
     pid: std.posix.pid_t,
 ) !profile.CpuProfile {
     const sample_capture = try runSample(allocator, pid, options.duration_ms);
-    const target_status = try std.fmt.allocPrint(allocator, "attached to pid {d}; process left running after sampling", .{pid});
+    const target_status = try std.fmt.allocPrint(
+        allocator,
+        "sampled attached pid {d}; process left running after sampling",
+        .{pid},
+    );
 
     return buildProfileFromCapture(allocator, options, sample_capture, target_status);
 }
@@ -42,6 +52,11 @@ fn collectAttached(
 const SampleCapture = struct {
     stderr: []const u8,
     text: []const u8,
+};
+
+const SamplePlan = struct {
+    pid: std.posix.pid_t,
+    note: []const u8,
 };
 
 fn buildProfileFromCapture(
@@ -117,6 +132,72 @@ fn runSample(allocator: std.mem.Allocator, pid: std.posix.pid_t, duration_ms: u3
         .stderr = sample_result.stderr,
         .text = sample_text,
     };
+}
+
+fn selectSamplingTarget(
+    allocator: std.mem.Allocator,
+    root_pid: std.posix.pid_t,
+    duration_ms: u32,
+) !SamplePlan {
+    const follow_window_ms: u32 = @min(duration_ms, 250);
+    const poll_interval_ms = 25 * std.time.ns_per_ms;
+
+    var chosen_pid = root_pid;
+    const deadline = std.time.milliTimestamp() + follow_window_ms;
+    while (std.time.milliTimestamp() < deadline) {
+        chosen_pid = try deepestDescendantPid(allocator, root_pid);
+        if (chosen_pid != root_pid) break;
+        std.Thread.sleep(poll_interval_ms);
+    }
+
+    return .{
+        .pid = chosen_pid,
+        .note = if (chosen_pid == root_pid)
+            try std.fmt.allocPrint(allocator, "sampled root pid {d}", .{root_pid})
+        else
+            try std.fmt.allocPrint(allocator, "sampled descendant pid {d} from root pid {d}", .{ chosen_pid, root_pid }),
+    };
+}
+
+fn deepestDescendantPid(allocator: std.mem.Allocator, root_pid: std.posix.pid_t) !std.posix.pid_t {
+    var current = root_pid;
+    var depth: usize = 0;
+
+    while (depth < 16) : (depth += 1) {
+        const child_pid = try newestChildPid(allocator, current);
+        if (child_pid == null) return current;
+        current = child_pid.?;
+    }
+
+    return current;
+}
+
+fn newestChildPid(allocator: std.mem.Allocator, pid: std.posix.pid_t) !?std.posix.pid_t {
+    const pid_text = try std.fmt.allocPrint(allocator, "{d}", .{pid});
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "/usr/bin/pgrep", "-P", pid_text },
+        .max_output_bytes = 8 * 1024,
+    });
+
+    switch (result.term) {
+        .Exited => |code| {
+            if (code == 1) return null;
+            if (code != 0) return error.ChildEnumerationFailed;
+        },
+        else => return error.ChildEnumerationFailed,
+    }
+
+    var latest: ?std.posix.pid_t = null;
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \n");
+        if (trimmed.len == 0) continue;
+        const child_pid = std.fmt.parseInt(std.posix.pid_t, trimmed, 10) catch continue;
+        if (latest == null or child_pid > latest.?) latest = child_pid;
+    }
+
+    return latest;
 }
 
 fn describeTerminatedTarget(allocator: std.mem.Allocator, term: std.process.Child.Term) ![]const u8 {
