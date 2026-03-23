@@ -25,7 +25,7 @@ pub fn writeCrashReport(path: []const u8, value: crash_report.CrashReport) !void
 }
 
 pub fn loadCpuProfile(allocator: std.mem.Allocator, path: []const u8) !profile.CpuProfile {
-    const bytes = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const bytes = try readFileAlloc(allocator, path, 1024 * 1024);
     return loadCpuProfileFromBytes(allocator, bytes);
 }
 
@@ -71,7 +71,7 @@ pub fn loadCpuProfileFromBytes(allocator: std.mem.Allocator, bytes: []const u8) 
 }
 
 pub fn loadCrashReport(allocator: std.mem.Allocator, path: []const u8) !crash_report.CrashReport {
-    const bytes = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    const bytes = try readFileAlloc(allocator, path, 1024 * 1024);
     return loadCrashReportFromBytes(allocator, bytes);
 }
 
@@ -85,9 +85,12 @@ pub fn loadCrashReportFromBytes(allocator: std.mem.Allocator, bytes: []const u8)
     const stack = try allocator.alloc(crash_report.StackFrame, parsed.value.stack.len);
     for (parsed.value.stack, 0..) |frame, index| {
         stack[index] = .{
+            .module = frame.module,
+            .address = parseOptionalHexAddress(frame.address),
             .file = frame.file,
             .line = frame.line,
             .symbol = frame.symbol,
+            .source = frame.source,
         };
     }
 
@@ -105,6 +108,8 @@ pub fn loadCrashReportFromBytes(allocator: std.mem.Allocator, bytes: []const u8)
         .args = parsed.value.args,
         .backend = parsed.value.backend,
         .termination = parsed.value.termination,
+        .exit_code = parsed.value.exit_code,
+        .signal_number = parsed.value.signal_number,
         .signal_name = parsed.value.signal,
         .fault_address = parsed.value.fault_address,
         .summary = parsed.value.summary,
@@ -149,6 +154,8 @@ const JsonCrashReport = struct {
     args: []const []const u8,
     backend: []const u8,
     termination: []const u8,
+    exit_code: ?u32 = null,
+    signal_number: ?u32 = null,
     signal: []const u8,
     fault_address: []const u8,
     summary: []const u8,
@@ -161,9 +168,12 @@ const JsonCrashReport = struct {
 };
 
 const JsonStackFrame = struct {
+    module: []const u8 = "unknown_module",
+    address: ?[]const u8 = null,
     file: []const u8,
     line: u32,
     symbol: []const u8,
+    source: []const u8 = "unknown",
 };
 
 const JsonRegisterValue = struct {
@@ -175,7 +185,30 @@ const JsonRegisterValue = struct {
 fn ensureParentDir(path: []const u8) !void {
     const parent = std.fs.path.dirname(path) orelse return;
     if (parent.len == 0) return;
+    if (std.fs.path.isAbsolute(parent)) {
+        try std.fs.makeDirAbsolute(parent);
+        return;
+    }
     try std.fs.cwd().makePath(parent);
+}
+
+fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8, max_bytes: usize) ![]u8 {
+    if (std.fs.path.isAbsolute(path)) {
+        var file = try std.fs.openFileAbsolute(path, .{});
+        defer file.close();
+        return try file.readToEndAlloc(allocator, max_bytes);
+    }
+    return try std.fs.cwd().readFileAlloc(allocator, path, max_bytes);
+}
+
+fn parseOptionalHexAddress(raw: ?[]const u8) ?u64 {
+    const value = raw orelse return null;
+    const trimmed = std.mem.trim(u8, value, " ");
+    if (trimmed.len == 0) return null;
+    if (std.mem.startsWith(u8, trimmed, "0x")) {
+        return std.fmt.parseInt(u64, trimmed[2..], 16) catch null;
+    }
+    return std.fmt.parseInt(u64, trimmed, 10) catch null;
 }
 
 test "cpu profile round-trips through JSON bytes" {
@@ -220,6 +253,8 @@ test "crash report round-trips through JSON bytes" {
         .args = &.{ "--flag" },
         .backend = "supervisor",
         .termination = "signal",
+        .exit_code = null,
+        .signal_number = 11,
         .signal_name = "SIGSEGV",
         .fault_address = "0xdeadbeef",
         .summary = "segfault",
@@ -228,9 +263,12 @@ test "crash report round-trips through JSON bytes" {
         .stdout = "hello",
         .stderr = "boom",
         .stack = &.{.{
+            .module = "/tmp/demo",
+            .address = "0x1234",
             .file = "src/main.zig",
             .line = 33,
             .symbol = "main",
+            .source = "passthrough",
         }},
         .registers = &.{.{
             .name = "rip",
@@ -246,7 +284,9 @@ test "crash report round-trips through JSON bytes" {
     const loaded = try loadCrashReportFromBytes(std.testing.allocator, bytes.items);
     try std.testing.expectEqualStrings(source.binary, loaded.binary);
     try std.testing.expectEqualStrings(source.signal_name, loaded.signal_name);
+    try std.testing.expectEqual(@as(?u32, 11), loaded.signal_number);
     try std.testing.expectEqual(@as(usize, 1), loaded.stack.len);
     try std.testing.expectEqualStrings("main", loaded.stack[0].symbol);
+    try std.testing.expectEqualStrings("/tmp/demo", loaded.stack[0].module);
     try std.testing.expectEqualStrings("rip", loaded.registers[0].name);
 }

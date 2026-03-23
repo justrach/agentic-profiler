@@ -30,6 +30,9 @@ const usage_text =
     \\  backends: stub, supervisor
     \\  supervisor currently captures termination and stdio only
     \\
+    \\Diff options:
+    \\  zigprofiler diff [--json] <before artifact> <after artifact>
+    \\
 ;
 
 pub fn main() !void {
@@ -67,7 +70,11 @@ pub fn main() !void {
             try result.render(stdout, parsed.format);
         },
         .bench => try bench_cmd.execute().render(stdout, parsed.format),
-        .diff => try diff_cmd.execute().render(stdout, parsed.format),
+        .diff => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            try (try diff_cmd.execute(arena.allocator(), parsed.command_args)).render(stdout, parsed.format);
+        },
     }
 }
 
