@@ -22,7 +22,8 @@ const usage_text =
     \\  help    show this message
     \\
     \\Run options:
-    \\  zigprofiler run [--json] [--duration-ms <ms>] [--backend <name>] <binary> [-- <target args...>]
+    \\  zigprofiler run [--json] [--duration-ms <ms>] [--backend <name>] (--pid <pid> | <binary> [-- <target args...>])
+    \\  backends: stub, macos-sample
     \\
     \\Crash options:
     \\  zigprofiler crash [--json] [--backend <name>] [--max-output-bytes <n>] <binary> [-- <target args...>]
