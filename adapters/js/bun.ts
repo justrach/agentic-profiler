@@ -3,6 +3,8 @@ type BunProfilerOptions = {
   profilerBin?: string;
   route?: string;
   maxDurationMs?: number;
+  pid?: number;
+  profilerArgs?: string[];
 };
 
 type BunHandler = (request: Request) => Response | Promise<Response>;
@@ -14,6 +16,8 @@ export function withBunProfiler(
   const route = options.route ?? "/__agentic/profile";
   const profilerBin = options.profilerBin ?? "agentic-profiler";
   const maxDurationMs = options.maxDurationMs ?? 30_000;
+  const pid = options.pid ?? Bun.pid;
+  const profilerArgs = options.profilerArgs ?? [];
 
   if (!options.token) {
     throw new Error("token is required for the Bun profiler endpoint");
@@ -33,12 +37,13 @@ export function withBunProfiler(
       const result = Bun.spawnSync({
         cmd: [
           profilerBin,
-          "run",
           "--json",
+          "run",
           "--duration-ms",
           String(durationMs),
+          ...profilerArgs,
           "--pid",
-          String(Bun.pid),
+          String(pid),
         ],
         stdout: "pipe",
         stderr: "pipe",

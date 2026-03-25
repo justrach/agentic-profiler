@@ -30,8 +30,12 @@ pub const CrashReport = struct {
     pub fn render(self: CrashReport, writer: anytype, format: output.Format) !void {
         switch (format) {
             .text => try self.renderText(writer),
-            .json => try self.renderJson(writer),
+            .json => try self.writeJson(writer),
         }
+    }
+
+    pub fn writeJson(self: CrashReport, writer: anytype) !void {
+        try self.renderJson(writer);
     }
 
     fn renderText(self: CrashReport, writer: anytype) !void {

@@ -30,8 +30,12 @@ pub const CpuProfile = struct {
     pub fn render(self: CpuProfile, writer: anytype, format: output.Format) !void {
         switch (format) {
             .text => try self.renderText(writer),
-            .json => try self.renderJson(writer),
+            .json => try self.writeJson(writer),
         }
+    }
+
+    pub fn writeJson(self: CpuProfile, writer: anytype) !void {
+        try self.renderJson(writer);
     }
 
     fn renderText(self: CpuProfile, writer: anytype) !void {
