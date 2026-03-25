@@ -6,6 +6,7 @@ const diff_cmd = @import("cmd/diff.zig");
 const mem_cmd = @import("cmd/mem.zig");
 const output = @import("output.zig");
 const run_cmd = @import("cmd/run.zig");
+const sandbox_cmd = @import("cmd/sandbox.zig");
 
 const usage_text =
     \\zigprofiler
@@ -18,6 +19,7 @@ const usage_text =
     \\  mem     memory profiling
     \\  crash   crash and fault analysis
     \\  bench   benchmark execution
+    \\  sandbox sandboxed command execution
     \\  diff    compare profile or benchmark artifacts
     \\  help    show this message
     \\
@@ -32,6 +34,10 @@ const usage_text =
     \\
     \\Bench options:
     \\  zigprofiler bench [--json] [--iterations <n>] [--output <path>] <binary> [-- <target args...>]
+    \\
+    \\Sandbox options:
+    \\  zigprofiler sandbox [--json] run [--timeout-ms <ms>] [--memory-kb <kb>] [--nice-level <n> | --no-nice] [--max-output-bytes <n>] [--output <path>] -- <command...>
+    \\  note: --memory-kb currently works on Linux only; macOS supports timeout + nice-based throttling in this mode
     \\
     \\Diff options:
     \\  zigprofiler diff [--json] <before artifact> <after artifact>
@@ -79,6 +85,13 @@ pub fn main() !void {
             try result.persist();
             try result.render(stdout, parsed.format);
         },
+        .sandbox => {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const result = try sandbox_cmd.execute(arena.allocator(), parsed.command_args);
+            try result.persist();
+            try result.render(stdout, parsed.format);
+        },
         .diff => {
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
@@ -99,6 +112,7 @@ const Command = enum {
     mem,
     crash,
     bench,
+    sandbox,
     diff,
 };
 
@@ -150,6 +164,7 @@ fn parseCommand(arg: []const u8) ?Command {
     if (std.mem.eql(u8, arg, "mem")) return .mem;
     if (std.mem.eql(u8, arg, "crash")) return .crash;
     if (std.mem.eql(u8, arg, "bench")) return .bench;
+    if (std.mem.eql(u8, arg, "sandbox")) return .sandbox;
     if (std.mem.eql(u8, arg, "diff")) return .diff;
     if (std.mem.eql(u8, arg, "help")) return .help;
     return null;

@@ -10,6 +10,7 @@ pub const CommandKind = enum {
     mem,
     crash,
     bench,
+    sandbox,
     diff,
 
     pub fn asString(kind: CommandKind) []const u8 {
@@ -18,6 +19,7 @@ pub const CommandKind = enum {
             .mem => "mem",
             .crash => "crash",
             .bench => "bench",
+            .sandbox => "sandbox",
             .diff => "diff",
         };
     }

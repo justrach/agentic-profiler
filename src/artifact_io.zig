@@ -2,6 +2,7 @@ const std = @import("std");
 const benchmark = @import("benchmark.zig");
 const crash_report = @import("crash_report.zig");
 const profile = @import("profile.zig");
+const sandbox_report = @import("sandbox_report.zig");
 
 pub fn writeCpuProfile(path: []const u8, value: profile.CpuProfile) !void {
     try ensureParentDir(path);
@@ -26,6 +27,17 @@ pub fn writeCrashReport(path: []const u8, value: crash_report.CrashReport) !void
 }
 
 pub fn writeBenchmarkRun(path: []const u8, value: benchmark.BenchmarkRun) !void {
+    try ensureParentDir(path);
+    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+
+    var buffer: [4096]u8 = undefined;
+    var writer = file.writer(&buffer);
+    try value.writeJson(&writer.interface);
+    try writer.interface.flush();
+}
+
+pub fn writeSandboxRun(path: []const u8, value: sandbox_report.SandboxRun) !void {
     try ensureParentDir(path);
     const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
